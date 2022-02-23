@@ -1,0 +1,102 @@
+
+
+#######   RNAseq analysis with edgeR ##########################################
+###############################################################################
+
+#set working directory in case of local computer
+setwd ("/home/lakatos/palonso/single_cell_sequencing2") 
+getwd ()
+
+data = read.csv("human_LGN_2021_exon-matrix.csv.gz") #in case of csv files
+data <- load("human_LGN_2021_exon-matrix.csv.gz") #in case of RData files
+head (data)
+dim (data)
+
+metadata = read.csv("human_LGN_2021_metadata.csv.gz") #in case of csv files
+
+grouping = metadata[[4]] #[[4]] returns a vector from a dataframe column
+
+class(grouping)
+
+grouping
+
+
+#############################################################################
+#rep function: creates a vector (c) with (each) repetitions of each value.
+
+group = rep(c("A", "B"), each = 3) #c() combines elements as a vector or list
+group
+class(group)
+
+
+
+#NEGATIVE BINOMIAL DISTRIBUTION MODEL
+###########################################################################
+
+
+#############################################################################
+#CREATE DGLELIST
+#counts exclude first colum as in our data.frame is not numeric
+#groups uses vector created from metadata (see above) to group samples 
+#according to treatments
+dgelist = DGEList(counts = data[2:1210], group = grouping)
+
+
+names(dgelist) #show column names
+
+dgelist #show samples grouped in experimental groups. Library size is sum of
+        #counts per column in input dataset
+
+dgelist_norm = calcNormFactors(dgelist, method = "TMM") #TMM normalization
+
+dgelist_norm
+
+
+#ESTIMATE DISPERSIONS PRIOR TO STATISTICS (the higher dispersions the less
+# powerful statistics will be)
+############################################################################
+#ESTIMATE COMMON DISPERSION
+#one number for all genes. Mean dispersion of all genes accross all samples 
+#how much general expression varies from the mean
+
+common_disp = estimateCommonDisp(dgelist_norm)
+
+common_disp
+
+############################################################################
+#ESTIMATE TAGWISE DISPERSION
+#Dispersion for each gene accross samples.
+
+tagwise_disp = estimateTagwiseDisp(common_disp)
+
+tagwise_disp
+
+
+#STATISTICS
+###########################################################################
+
+exact_test = exactTest(tagwise_disp, pair=c(1,5)) 
+#pair is a vector of length 2 stating groups to be compared. Default 2,1
+
+
+exact_test = exactTest(tagwise_disp)
+
+exact_test #has "table", "comparison" and "genes" element
+
+head(exact_test$table) # $ extracts a particular element of a data object
+
+topTags(exact_test) # show top DE genes
+
+
+#GENERALIZED LINEAR MODEL (for datasets more complex than 2 groups)
+###########################################################################
+
+#make design
+
+design = model.matrix(data=data[2:1210], ~grouping) #not sure what "~" means
+
+head(design)
+
+dgelist_2 = DGEList(counts = data[2:1210], lib.size = 1210, design)
+
+length(data)
