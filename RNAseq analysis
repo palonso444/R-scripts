@@ -7,47 +7,70 @@
 setwd ("/home/lakatos/palonso/single_cell_sequencing2") 
 getwd ()
 
-data = read.csv("human_LGN_2021_exon-matrix.csv.gz") #in case of csv files
-data <- load("human_LGN_2021_exon-matrix.csv.gz") #in case of RData files
-head (data)
-dim (data)
+dataset <- read.csv("human_LGN_2021_exon-matrix.csv.gz") #in case of csv files
+dataset <- load("human_LGN_2021_exon-matrix.csv.gz") #in case of RData files
 
-metadata = read.csv("human_LGN_2021_metadata.csv.gz") #in case of csv files
+head (dataset) #shows first line
+dim (dataset) #shows number of rows and columns
+str(dataset) #shows info about the structure
 
-grouping = metadata[[4]] #[[4]] returns a vector from a dataframe column
+metadata <- read.csv("human_LGN_2021_metadata.csv.gz") #in case of csv files
 
-class(grouping)
-
-grouping
+grouping <- metadata[[4]] #[[4]] returns a vector from a dataframe column
 
 
 #############################################################################
 #rep function: creates a vector (c) with (each) repetitions of each value.
 
-group = rep(c("A", "B"), each = 3) #c() combines elements as a vector or list
+group <- rep(c("A", "B"), each = 3) #c() combines elements as a vector or list
 group
 class(group)
 
+# other useful functions
+
+dataset$groups <- 1 # adds one column (groups) to dataset with value 1
+
+added <- c(0,0)
+
+grouping <- c(grouping, added) # in order to march dataset column num
+
+dataset[nrow(dataset) + 1,] = grouping #adds vector grouping last row of dataset
+
+filtered <- filter(dataset, dataset[line_num] == 1) #dplyr package
 
 
 #NEGATIVE BINOMIAL DISTRIBUTION MODEL
 ###########################################################################
 
-
-#############################################################################
 #CREATE DGLELIST
 #counts exclude first colum as in our data.frame is not numeric
 #groups uses vector created from metadata (see above) to group samples 
 #according to treatments
-dgelist = DGEList(counts = data[2:1210], group = grouping)
 
+dgelist <- DGEList(counts = dataset[2:1210], group = grouping)
+
+
+######################################playing around
+dgelist_subset_1 <- filter(dgelist$samples, dgelist$samples$group == 1)
+dgelist_subset_2 <- filter(dgelist$samples, dgelist$samples$group == 2)
+
+#combine vertically
+combined_dgelist_subset <- rbind(dgelist_subset_1, dgelist_subset_2)
+##################################################################
+
+dgelist <- DGEList(counts = dataset[2:1210], group = grouping)
 
 names(dgelist) #show column names
+
+dim(dgelist$samples)
+head(dgelist$samples)
+
+
 
 dgelist #show samples grouped in experimental groups. Library size is sum of
         #counts per column in input dataset
 
-dgelist_norm = calcNormFactors(dgelist, method = "TMM") #TMM normalization
+dgelist_norm <- calcNormFactors(dgelist, method = "TMM") #TMM normalization
 
 dgelist_norm
 
@@ -59,7 +82,7 @@ dgelist_norm
 #one number for all genes. Mean dispersion of all genes accross all samples 
 #how much general expression varies from the mean
 
-common_disp = estimateCommonDisp(dgelist_norm)
+common_disp <- estimateCommonDisp(dgelist_norm)
 
 common_disp
 
@@ -67,7 +90,7 @@ common_disp
 #ESTIMATE TAGWISE DISPERSION
 #Dispersion for each gene accross samples.
 
-tagwise_disp = estimateTagwiseDisp(common_disp)
+tagwise_disp <- estimateTagwiseDisp(common_disp)
 
 tagwise_disp
 
@@ -75,11 +98,11 @@ tagwise_disp
 #STATISTICS
 ###########################################################################
 
-exact_test = exactTest(tagwise_disp, pair=c(1,5)) 
+exact_test <- exactTest(tagwise_disp, pair=c(2,1)) 
 #pair is a vector of length 2 stating groups to be compared. Default 2,1
 
 
-exact_test = exactTest(tagwise_disp)
+exact_test <- exactTest(tagwise_disp)
 
 exact_test #has "table", "comparison" and "genes" element
 
@@ -91,12 +114,86 @@ topTags(exact_test) # show top DE genes
 #GENERALIZED LINEAR MODEL (for datasets more complex than 2 groups)
 ###########################################################################
 
-#make design
+#make model matrix (design)
 
-design = model.matrix(data=data[2:1210], ~grouping) #not sure what "~" means
+design <- model.matrix(~grouping, data=dataset[2:1210]) # "~" means that grouping
+                                                    #is a dependent variable 
+design
 
-head(design)
+#use design object to calculate dispersions on TMM normalized DGEList
+############################################################################
+#ESTIMATE COMMON DISPERSION
 
-dgelist_2 = DGEList(counts = data[2:1210], lib.size = 1210, design)
+common_disp2 <- estimateGLMCommonDisp(dgelist_norm, design)
 
-length(data)
+common_disp2
+
+#ESTIMATE TRENDED DISPERSION (not possible with NBD model)
+#Mean dispersion across all genes with similar abundance.
+
+trended_disp <- estimateGLMTrendedDisp(common_disp2, design)
+
+trended_disp
+
+#ESTIMATE TAGWISE DISPERSION
+
+tagwise_disp2 <- estimateGLMTagwiseDisp(trended_disp, design)
+
+
+#FIT DATA TO THE GENEALIZED LINEAR MODEL
+############################################################################
+
+fit <- glmFit(tagwise_disp2, design)
+str(fit)
+names (fit)
+head (fit)
+
+#perform likelihood ratio test
+
+likelihood_r <- glmLRT(fit)
+
+likelihood_r
+
+topTags (likelihood_r)
+
+
+
+#LINEAR MODEL does not work for more than 2 sample groups
+############################################################################
+#data transformation with limmavoom
+
+library(limma)
+
+design2 <- model.matrix(~0+grouping) #adapt design step to limma
+
+design2
+
+#stabilize variance of samples
+
+#if not straight line in plot means that variance is not stabilized,
+#depends on gene read counts
+
+stab_var <- voom(counts=dgelist_nom, design = design2, plot = T)
+
+
+#run linear model normalizing for unequal variances (weights)
+
+fit2 <- lmFit (stab_var, design2, weights = stab_var$weights)
+
+names(fit2)
+
+#make contrast matrix (need to match design column headers)
+
+contrast_matrix <- makeContrasts(contrasts = "grouping", levels = design2)
+
+contrast_matrix
+
+fit3 <- contrasts.fit(fit2, contrast_matrix)
+
+eBayes_test <- eBayes(fit2)
+
+#if the gene ranks of these 3 test are radically different smth is wrong
+#with the code
+topTable(eBayes_test) # use TopTable not TopTags for eBayes
+topTags (likelihood_r)
+topTags (exact_test)
