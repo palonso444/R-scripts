@@ -1,0 +1,245 @@
+
+# following https://www.youtube.com/watch?v=AHW0FfHDulI&t=432s
+
+# from GEO we have 3 files: matrix (.mtx), in this case sparse matrix,
+# genes (features) sequenced transcripts, make up the rows of the matrix,
+# barcodes, cell barcodes that make up the columns
+
+getwd ()
+setwd("/home/lakatos/palonso/Single_cell_sequencing/")
+
+# load required packages
+library(Seurat) ## single cell analysis workflow toolkit
+                # loads objects directly on RAM, might be problematic for
+                # large datasets
+library(ggplot2) ## ubiquitous - better plotting functions than default, 
+                  #seurat plots are ggplot objects
+library(tidyverse) ## ubiquitous - data manipulation toolkit
+
+library(reticulate) ## allows python functions to be called in R
+library(Matrix) ## needed to read in a .mtx file
+
+library(AnnotationDbi) ## to convert ensembl ID to symbol
+library(org.Mm.eg.db)
+library(viridis) ## beautiful and scientifically better heatmap colour schemes
+
+## start with public data in a matrix format (easy)
+## real data comes as raw data (.fastq files etc) 
+##needs to be aligned before
+
+
+## read in dataset ----
+
+# change the names to "barcodes,features,matrix" if required, as in this case
+dataset <- Read10X (data.dir = "GSM4151577_renamed/", gene.column = 1, 
+                 unique.features = TRUE, strip.suffix = FALSE)
+
+dataset #rows are ensemble ID (more unique), are convertibles to gene symbol,
+      #not every ensemble ID maps to a gene symbol, some map to 2, some to none.
+      ## ensembl better for anlysis but less readable by humans
+      ## ideally analyse as ENS and convert later, but...
+      ## biomart takes ages and is cumbersome
+
+#Convering ensemble ID to gene symbol, umnapped will remain as symbol
+
+dataset_converted<- select(x = org.Mm.eg.db, 
+           keys = rownames(dataset), 
+           column = "SYMBOL", 
+           keytype = "ENSEMBL",
+           multiVals = "first",asNA=F)
+
+head(dataset_converted)
+head(dataset)
+
+
+#we create a new column in dataset_converted named FINAL
+#ifelse will add in this column the gene ensemble if initial condition evaluates
+#to true (symbol is.na). If false, will add the gene symbol
+dataset_converted$FINAL <- ifelse(is.na(dataset_converted$SYMBOL),
+                                  dataset_converted$ENSEMBL, 
+                                  dataset_converted$SYMBOL)
+
+head(dataset_converted$FINAL)
+head(dataset_converted)
+
+#for loop to 
+#replace rownames in the matrix with gene symbols or ensemble ID of $FINAL
+
+rownames (dataset) [2] #returns second rowname
+
+remove(dataset)
+
+for (name in rownames(dataset)) { # for each name of row (ensemble ID)
+  
+  rownames(dataset)[match(name, rownames(dataset))] <- dataset_converted$FINAL[match(name, dataset_converted$ENSEMBL)]
+
+} #left side: each row name of dataset that matches row name of dataset (so all of them)
+# right side: will be replaced by name in $FINAL at index in which name maches $ENSEMBLE of dataset_final
+# returns last name of dataset
+
+#create Seurat object. Project and assay arguments are optional
+data_Seurat <- CreateSeuratObject(dataset, 
+                                  project = "Example_set", 
+                                  assay = "RNA",
+                                  min.cells = 0, 
+                                  min.features = 0, 
+                                  names.field = 1, 
+                                  names.delim = "_", 
+                                  meta.data = NULL)
+
+data_Seurat
+## Useful commands of the Seurat package
+# https://satijalab.org/seurat/essential_commands.html
+
+
+## QC
+## % of mithocondrial transcripts that make up overall number of transcripts
+## on cell and percentage of empty features 
+## this is probably already done in alignment step but nice to check
+## following the offical vignettes is the key from here
+## https://satijalab.org/seurat/v3.2/pbmc3k_tutorial.html
+
+#adds quality control information to Seurat file (% mithocondrial)
+data_Seurat$percent.mt_RNA <- PercentageFeatureSet(data_Seurat, pattern = "^Mt")
+                                              #MT upper case if human
+data_Seurat
+rownames(data_Seurat)
+str(data_Seurat)
+
+range(data_Seurat$percent.mt_RNA)
+
+#plot data
+VlnPlot(data_Seurat, features = c("nFeature_RNA", "nCount_RNA", "percent.mt_RNA"), ncol = 3)
+
+#subset with recommended tresholds
+data_Seurat_filtered <- subset(data_Seurat, 
+                      subset = nFeature_RNA > 200 & 
+                        nFeature_RNA < 2500 & percent.mt_RNA < 5)
+
+#normalize data
+data_Seurat_norm <- NormalizeData(data_Seurat_filtered) #default log for expression of 
+# each feature normalization against total expression 
+
+
+#find highly variable features, cut background noise and focus on genes that
+#have most variability
+
+data_Seurat_var <- FindVariableFeatures(data_Seurat_norm, 
+                                    selection.method = "vst",
+                                    nfeatures = 2000) # 2000 is default value
+
+top20 <- head (VariableFeatures(data_Seurat_var),20) # view top 20 most variable genes
+
+plot1 <- VariableFeaturePlot(data_Seurat_var)
+plot1 <- LabelPoints(plot = plot1, 
+                     points = top20, repel = TRUE) #label top20 genes
+plot1
+
+#scale genes (mean expression of 0, variance of 1) to run PCA
+
+data_Seurat_scal <- ScaleData(data_Seurat_var, features = rownames(data_Seurat_var))
+
+#dim reduction
+data_Seurat_PCA <- RunPCA(data_Seurat_scal, features = VariableFeatures(data_Seurat_scal))
+
+ElbowPlot(data_Seurat_PCA) # where things starts to level off is number of dim
+                        # that we should take for PCA plot (between 15 and 20)
+
+#cluster
+
+data_Seurat_neigh <- FindNeighbors(data_Seurat_PCA, 
+                             dims = 1:20) ## generates graph with 20 dimensions
+                                          ## usually btw 10 and 20 is good, 
+                                          ## is possible to play around 
+                                          ## but best follow Elbow plot
+
+data_Seurat_clusters <- FindClusters(data_Seurat_neigh, 
+                            resolution = 0.1) 
+                          ## finds clusters/communities in graph (cell types)
+                          #the lower the resolution the less clusters will find
+                          # 0.1 is good
+
+data_Seurat_UMAP <- RunUMAP(data_Seurat_clusters, 
+                       dims = 1:20, n.neighbors = 20,
+                       min.dist = .01,spread = 6)
+                      # further reduces dimensionality
+                      # num UMAP clusters should match num PCA clusters
+
+#plot to review images before export
+
+DimPlot(data_Seurat_UMAP, reduction = "umap", pt.size = 2)
+dev.off() # dev.off (device off) should be run after some plot commands but
+          # not sure why
+
+
+# find marker genes for each cluster on graph. A final argument can be passed
+# (test.use), to select statistical test. Default is Wilcox rank test. 
+# is only.pos = T only positively expressed genes will be considered
+# min.pct is minimmum percentage of cells in cluster required to express
+# the gene for it to count in the analysis (do not do higher than 0.25)
+# logfc.treshold is the minimmum log change of gene expression for a gene
+#  to count in the analysis
+
+data_Seurat_markers <- FindAllMarkers(data_Seurat_UMAP, only.pos = F, 
+                              min.pct = 0.2, logfc.threshold = 0.2)
+
+# FindAllMarkers compares each cluster will al others. For cluster to cluster
+# comparison, run:
+
+data_Seurat_markers_vs <- FindMarkers(data_Seurat_UMAP, ident.1= "2", 
+                                      ident.2="6",
+                                      only.pos = F, 
+                                      min.pct = 0.2, logfc.threshold = 0.2)
+                                      # this compares 2 versus 6
+
+
+
+#vector to use in Heatmap
+top10_data_Seurat_markers <- data_Seurat_markers %>% group_by(cluster) %>% top_n(n = 10, wt = avg_log2FC)
+
+
+DoHeatmap(data_Seurat_UMAP, features = top10_data_Seurat_markers$gene,) 
++ NoLegend() + scale_fill_viridis(option = "B")+ 
+  theme(text = element_text(size = 20))
+dev.off()
+
+## rank and save the marker genes
+
+## rank for GSEA analysis later
+data_Seurat_markers$rank <-(data_Seurat_markers $avg_log2FC)*(-log(data_Seurat_markers$p_val_adj)) 
+
+write.csv(dat.markers,"data_Seurat_DEG_genes.csv")
+
+## plot key (the most expressed in heatmap) genes
+
+FeaturePlot(data_Seurat_UMAP, 
+            features = c("Slc34a1","Slc12a3","Umod","Aqp2","Lcn2","Slc12a1","Foxi1","Havcr1","Mki67"),
+            order=T, pt.size = 1)
+dev.off()
+
+
+DotPlot(object = data_Seurat_UMAP,
+        features = c("Slc34a1","Umod","Tfcp2l1","Emcn","Cd3g","Gzma","Cx3cr1","Itgax","S100a9","Pdgfrb","Cd79a","Mki67"),
+        dot.scale = 15) + coord_flip()
+dev.off()
+
+        # better visualization than feature plot
+
+
+
+
+
+## in case you want to rename legends in PCA when you know the cell types
+
+data_Seurat_UMAP_renamed <- RenameIdents(object = data_Seurat_UMAP, 
+                                         `0` = "PT1",
+                                         `1` = "PT2",
+                                         `2` = "PT3",
+                                         `3` = "Loh/DCT",
+                                         `4` = "collecting duct",
+                    `5` = "Endothelial",`6` = "Macrophage")
+
+DimPlot(data_Seurat_UMAP_renamed, reduction = "umap",
+        pt.size = 6, label = T,repel=T)
+      #labed is set to true so each cluster is labeled
+dev.off()
