@@ -1,3 +1,3 @@
 # R-scripts
 
-Basic nioinformatic analyses
+Basic bioinformatic analyses
